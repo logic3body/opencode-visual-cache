@@ -324,7 +324,8 @@ function TokenCachePanel(props: {
 
   const sep = createMemo(() => "\u2500".repeat(Math.max(1, panelWidth() - GUTTER)))
   const barW = createMemo(() => {
-    const overhead = visualWidth(T.hit) + 1 + 2 + 1 + /*pct*/5 + /*trend*/8 + GUTTER
+    const trendSpace = d().hasTrendData ? visualWidth(" " + "\u2191" + "99.9" + "%") : 0
+    const overhead = visualWidth(T.hit) + 1 + 2 + 1 + /*pct*/5 + trendSpace + GUTTER
     return Math.max(3, panelWidth() - overhead)
   })
   const bar = createMemo(() => progressBar(d().hitRate, barW()))
@@ -359,10 +360,21 @@ function TokenCachePanel(props: {
           <span style={{ fg: pal().muted }}>{open() ? "\u25bc " : "\u25b6 "}</span>
           <span style={{ fg: pal().primary }}><b>{T.title}</b></span>
           <Show when={!open()}>
-            <span>
-              {" ".repeat(Math.max(1, panelWidth() - GUTTER - 2 - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
-            </span>
-            <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
+            <Show when={d().hasTrendData}>
+              <span>
+                {" ".repeat(Math.max(1, panelWidth() - GUTTER - 2 - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded) - visualWidth(" " + "\u2191" + "99.9" + "%")))}
+              </span>
+              <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
+              <span style={{ fg: d().trend !== 0 ? (d().trend > 0 ? pal().success : pal().error) : pal().text }}>
+                {" "}{d().trend > 0 ? "\u2191" : d().trend < 0 ? "\u2193" : "-"}{d().trend !== 0 ? Math.abs(d().trend).toFixed(1) + "%" : ""}
+              </span>
+            </Show>
+            <Show when={!d().hasTrendData}>
+              <span>
+                {" ".repeat(Math.max(1, panelWidth() - GUTTER - 2 - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
+              </span>
+              <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
+            </Show>
           </Show>
         </text>
 
