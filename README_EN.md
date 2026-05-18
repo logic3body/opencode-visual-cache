@@ -58,12 +58,6 @@ Create or edit `~/.config/opencode/tui.jsonc`:
 }
 ```
 
-Or run the auto-installer:
-
-```bash
-npx opencode-visual-cache
-```
-
 ### 3. Restart OpenCode
 
 Open any session — the cache stats panel appears in the sidebar.

@@ -57,12 +57,6 @@ npm install -g opencode-visual-cache
 }
 ```
 
-或者运行安装脚本自动配置：
-
-```bash
-npx opencode-visual-cache
-```
-
 ### 3. 重启 OpenCode
 
 进入任意 session，侧边栏即可看到缓存统计面板。
