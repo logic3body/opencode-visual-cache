@@ -79,6 +79,8 @@ const T = LANG_ZH ? {
   hitFolded:  "命中",
   inputRate:  "输入",
   cacheRate:  "缓存",
+  writeRate:  "写入",
+  noData:    "等待缓存数据...",
   tok:        "tok",
 } as const : {
   title:      "Token Cache",
@@ -96,6 +98,8 @@ const T = LANG_ZH ? {
   hitFolded:  "hit",
   inputRate:  "in",
   cacheRate:  "cache",
+  writeRate:  "write",
+  noData:    "Waiting for cache data...",
   tok:        "tok",
 } as const
 
@@ -211,6 +215,14 @@ const DEFAULT_PANEL_WIDTH = 26
 /** Horizontal space eaten by border (1+1) + padding (2+2). */
 const GUTTER = 2 + 4
 
+/** ── layout measurement constants (visual columns) ── */
+const LABEL_GAP = 1        // label（如 "Hit"）后面的空格
+const BAR_BRACKETS = 2     // "[" + "]" 包围进度条
+const BAR_GAP = 1          // "]" 后面的空格
+const PCT_FIXED_WIDTH = 5  // "XX.X%" 固定 5 字符宽度
+const HEADER_PREFIX = 2    // 折叠态标题行：▶/▼ 图标 + 后面的空格
+const UNIT_GAP = 1         // 计量单位前的空格（如 "tok"）
+
 function TokenCachePanel(props: {
   theme: TuiThemeCurrent
   api: TuiPluginApi
@@ -218,6 +230,7 @@ function TokenCachePanel(props: {
 }): JSX.Element {
   const [panelWidth, setPanelWidth] = createSignal(DEFAULT_PANEL_WIDTH)
   const [open, setOpen] = createSignal(true)
+  let boxEl: any
 
   // ── scan session messages reactively ──
   // SolidJS createMemo re-evaluates whenever the underlying
@@ -240,6 +253,7 @@ function TokenCachePanel(props: {
     for (const msg of msgs) {
       if (msg.role !== "assistant") continue
       const t = (msg as AssistantMessage).tokens
+      if (!t) continue
       const msgInputTokens = num(t.input) + num(t.cache?.read)
       const msgReadTokens = num(t.cache?.read)
       if (msgInputTokens > 0) {
@@ -261,6 +275,7 @@ function TokenCachePanel(props: {
     let saved = 0
     let inputRate = 0
     let cacheReadRate = 0
+    let cacheWriteRate = 0
     if (read > 0 && pid && mid) {
       for (const provider of props.api.state.provider) {
         if (provider.id !== pid) continue
@@ -268,6 +283,7 @@ function TokenCachePanel(props: {
         if (!model?.cost) continue
         inputRate = num(model.cost.input)
         cacheReadRate = num(model.cost.cache?.read)
+        cacheWriteRate = num(model.cost.cache?.write)
         const diff = inputRate - cacheReadRate
         if (diff > 0) saved = (read * diff) / 1_000_000
         break
@@ -280,7 +296,7 @@ function TokenCachePanel(props: {
     const totalInput = input + read
     const sessionHitRate = totalInput > 0 ? (read / totalInput) * 100 : 0
     const model = mid.split("/").pop() ?? mid
-    const hasPricing = inputRate > 0 || cacheReadRate > 0
+    const hasPricing = inputRate > 0 || cacheReadRate > 0 || cacheWriteRate > 0
 
     let trend = 0
     const hasTrendData = prevMsgHitRate >= 0 && lastMsgHitRate >= 0
@@ -292,15 +308,13 @@ function TokenCachePanel(props: {
 
     return {
       hitRate, read, write, freshInput: input, output,
-      cost, saved, model, inputRate, cacheReadRate, hasPricing,
+      cost, saved, model, inputRate, cacheReadRate, cacheWriteRate, hasPricing,
       hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0,
       trend, hasTrendData,
       providerName,
       sessionHitRate,
     }
   })
-
-  const d = () => data()
 
   // ── colours ──
   // Pull from the current theme, auto-desaturate if too punchy,
@@ -320,7 +334,7 @@ function TokenCachePanel(props: {
   })
 
   const hitColor = createMemo(() => {
-    const r = d().hitRate
+    const r = data().hitRate
     if (r >= 85) return pal().success
     if (r >= 70) return pal().warning
     return pal().error
@@ -332,61 +346,71 @@ function TokenCachePanel(props: {
   }
 
   const barW = createMemo(() => {
-    const trendSpace = d().hasTrendData ? 1 + visualWidth(trendLabel(d().trend)) : 0
-    const overhead = visualWidth(T.hit) + 1 + 2 + 1 + /*pct*/5 + trendSpace + GUTTER
+    const trendSpace = data().hasTrendData ? LABEL_GAP + visualWidth(trendLabel(data().trend)) : 0
+    const overhead = visualWidth(T.hit) + LABEL_GAP + BAR_BRACKETS + BAR_GAP + PCT_FIXED_WIDTH + trendSpace + GUTTER
     return Math.max(3, panelWidth() - overhead)
   })
-  const bar = createMemo(() => progressBar(d().hitRate, barW()))
-  const pct = createMemo(() => d().hitRate.toFixed(1) + "%")
+  const bar = createMemo(() => progressBar(data().hitRate, barW()))
+  const pct = createMemo(() => data().hitRate.toFixed(1) + "%")
 
   // left-align label, right-align value — auto-fill space between
   const justify = (label: string, value: string, unit = ""): string => {
     const gauge = panelWidth() - GUTTER
-    const used = visualWidth(label) + visualWidth(value) + (unit ? visualWidth(unit) + 1 : 0)
+    const used = visualWidth(label) + visualWidth(value) + (unit ? visualWidth(unit) + UNIT_GAP : 0)
     const gap = Math.max(1, gauge - used)
     return label + " ".repeat(gap) + value + (unit ? " " + unit : "")
   }
 
   return (
-    <Show when={d().hasData}>
-      <box
-        border
-        borderColor={pal().border}
-        paddingTop={0}
-        paddingBottom={0}
-        paddingLeft={2}
-        paddingRight={2}
-        flexDirection="column"
-        gap={0}
-        onSizeChange={function () {
-          const w = Math.max(MIN_PANEL_WIDTH, this.width)
-          setPanelWidth((prev) => (prev === w ? prev : w))
-        }}
-      >
-        {/* collapsible header */}
-        <text onMouseUp={() => setOpen((o) => !o)}>
-          <span style={{ fg: pal().muted }}>{open() ? "\u25bc " : "\u25b6 "}</span>
-          <span style={{ fg: pal().primary }}><b>{T.title}</b></span>
-          <Show when={!open()}>
-            <Show when={d().hasTrendData}>
-              <span>
-                {" ".repeat(Math.max(1, panelWidth() - GUTTER - 2 - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded + " " + trendLabel(d().trend))))}
-              </span>
-              <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
-              <span style={{ fg: d().trend !== 0 ? (d().trend > 0 ? pal().success : pal().error) : pal().text }}>
-                {" "}{trendLabel(d().trend)}
-              </span>
-            </Show>
-            <Show when={!d().hasTrendData}>
-              <span>
-                {" ".repeat(Math.max(1, panelWidth() - GUTTER - 2 - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
-              </span>
-              <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
-            </Show>
+    <box
+      border
+      borderColor={pal().border}
+      paddingTop={0}
+      paddingBottom={0}
+      paddingLeft={2}
+      paddingRight={2}
+      flexDirection="column"
+      gap={0}
+      ref={boxEl}
+      onSizeChange={() => {
+        // 通过 ref 获取 Renderable 实例宽度
+        const w = boxEl ? Math.max(MIN_PANEL_WIDTH, boxEl.width) : DEFAULT_PANEL_WIDTH
+        setPanelWidth((prev) => (prev === w ? prev : w))
+      }}
+    >
+      {/* collapsible header */}
+      <text onMouseUp={() => setOpen((o) => !o)}>
+        <span style={{ fg: pal().muted }}>{open() ? "\u25bc " : "\u25b6 "}</span>
+        <span style={{ fg: pal().primary }}><b>{T.title}</b></span>
+        <Show when={!open() && data().hasData}>
+          <Show when={data().hasTrendData}>
+            <span>
+              {" ".repeat(Math.max(1, panelWidth() - GUTTER - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded + " " + trendLabel(data().trend))))}
+            </span>
+            <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
+            <span style={{ fg: data().trend !== 0 ? (data().trend > 0 ? pal().success : pal().error) : pal().text }}>
+              {" "}{trendLabel(data().trend)}
+            </span>
           </Show>
-        </text>
+          <Show when={!data().hasTrendData}>
+            <span>
+              {" ".repeat(Math.max(1, panelWidth() - GUTTER - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
+            </span>
+            <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
+          </Show>
+        </Show>
+      </text>
 
-        <Show when={open()}>
+      <Show when={open()}>
+        <Show when={data().hasData} fallback={
+          <>
+            <text fg={pal().muted}>{sep()}</text>
+            <text>
+              <span style={{ fg: pal().muted }}>{"> "}</span>
+              <span style={{ fg: pal().muted }}>{T.noData}</span>
+            </text>
+          </>
+        }>
           <text fg={pal().muted}>{sep()}</text>
 
           {/* hit rate + bar — inline to avoid box spacing */}
@@ -394,78 +418,83 @@ function TokenCachePanel(props: {
             <span style={{ fg: pal().text }}>{T.hit} </span>
             <span style={{ fg: hitColor() }}>[{bar()}] </span>
             <span style={{ fg: pal().text }}>{pct()}</span>
-            <Show when={d().hasTrendData}>
-              <span style={{ fg: d().trend !== 0 ? (d().trend > 0 ? pal().success : pal().error) : pal().text }}>
-                {" "}{trendLabel(d().trend)}
+            <Show when={data().hasTrendData}>
+              <span style={{ fg: data().trend !== 0 ? (data().trend > 0 ? pal().success : pal().error) : pal().text }}>
+                {" "}{trendLabel(data().trend)}
               </span>
             </Show>
           </text>
 
           {/* session cumulative hit rate */}
           <text fg={pal().muted}>
-            {justify(T.totalHit, d().sessionHitRate.toFixed(1) + "%")}
+            {justify(T.totalHit, data().sessionHitRate.toFixed(1) + "%")}
           </text>
 
           {/* token breakdown */}
-          <Show when={d().read > 0}>
+          <Show when={data().read > 0}>
             <text fg={pal().muted}>
-              {justify(T.read,  fmt(d().read),         T.tok)}
+              {justify(T.read,  fmt(data().read),         T.tok)}
             </text>
           </Show>
-          <Show when={d().write > 0}>
+          <Show when={data().write > 0}>
             <text fg={pal().muted}>
-              {justify(T.write, fmt(d().write),        T.tok)}
+              {justify(T.write, fmt(data().write),        T.tok)}
             </text>
           </Show>
           <text fg={pal().muted}>
-            {justify(T.miss,  fmt(d().freshInput),   T.tok)}
+            {justify(T.miss,  fmt(data().freshInput),   T.tok)}
           </text>
           <text fg={pal().muted}>
-            {justify(T.out,   fmt(d().output),       T.tok)}
+            {justify(T.out,   fmt(data().output),       T.tok)}
           </text>
 
           <text fg={pal().muted}>{sep()}</text>
 
           {/* cost */}
           <text fg={pal().text}>
-            {justify(T.cost,  fmtCost(d().cost))}
+            {justify(T.cost,  fmtCost(data().cost))}
           </text>
 
           {/* saved */}
-          <Show when={d().saved > 0}>
+          <Show when={data().saved > 0}>
             <text>
               <span style={{ fg: pal().muted }}>{T.saved}</span>
-              <span>{" ".repeat(Math.max(1, panelWidth() - GUTTER - visualWidth(T.saved) - visualWidth("~" + fmtCost(d().saved))))}</span>
-              <span style={{ fg: pal().success }}>~{fmtCost(d().saved)}</span>
+              <span>{" ".repeat(Math.max(1, panelWidth() - GUTTER - visualWidth(T.saved) - visualWidth("~" + fmtCost(data().saved))))}</span>
+              <span style={{ fg: pal().success }}>~{fmtCost(data().saved)}</span>
             </text>
           </Show>
 
           {/* provider */}
-          <Show when={d().providerName}>
+          <Show when={data().providerName}>
             <text fg={pal().muted}>
-              {justify(T.provider, d().providerName)}
+              {justify(T.provider, data().providerName)}
             </text>
           </Show>
 
           {/* model */}
           <text fg={pal().muted}>
-            {justify(T.model, d().model)}
+            {justify(T.model, data().model)}
           </text>
 
           {/* rates */}
-          <Show when={d().hasPricing}>
+          <Show when={data().hasPricing}>
             <text fg={pal().muted}>
-              {justify(T.rate, "$" + d().inputRate.toFixed(2) + "/M " + T.inputRate)}
+              {justify(T.rate, "$" + data().inputRate.toFixed(2) + "/M " + T.inputRate)}
             </text>
-            <Show when={d().cacheReadRate > 0}>
+            <Show when={data().cacheReadRate > 0}>
               <text fg={pal().muted}>
-                {justify("", "$" + d().cacheReadRate.toFixed(2) + "/M " + T.cacheRate)}
+                {justify("", "$" + data().cacheReadRate.toFixed(2) + "/M " + T.cacheRate)}
+              </text>
+            </Show>
+            <Show when={data().cacheWriteRate > 0}>
+              <text fg={pal().muted}>
+                {justify("", "$" + data().cacheWriteRate.toFixed(2) + "/M " + T.writeRate)}
               </text>
             </Show>
           </Show>
         </Show>
-      </box>
-    </Show>
+      </Show>
+    </box>
   )
 }
 
