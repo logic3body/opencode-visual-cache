@@ -9,8 +9,15 @@ import type {
   TuiPluginModule,
   TuiThemeCurrent,
 } from "@opencode-ai/plugin/tui"
-import type { AssistantMessage, Message } from "@opencode-ai/sdk"
-import { createMemo, createSignal, Show } from "solid-js"
+import type { UserMessage, AssistantMessage, Message } from "@opencode-ai/sdk"
+import type {
+  Part,
+  TextPart,
+  ToolPart,
+  FilePart,
+  ReasoningPart,
+} from "@opencode-ai/sdk/v2"
+import { createMemo, createSignal, onMount, onCleanup, Show } from "solid-js"
 import { PLUGIN_VERSION } from "./_version"
 
 // ---------------------------------------------------------------------------
@@ -52,7 +59,7 @@ function visualPadEnd(s: string, cols: number): string {
   return pad > 0 ? s + " ".repeat(pad) : s
 }
 
-// ── debug: set CACHE_TUI_LANG=en|zh to override auto-detection ──
+// ── language override (env: CACHE_TUI_LANG) ──
 const DEBUG_LANG = typeof process !== "undefined" ? process.env?.CACHE_TUI_LANG : undefined
 
 // ── language ──────────────────────────────────────────────────────
@@ -83,6 +90,14 @@ const T = LANG_ZH ? {
   writeRate:  "写入",
   noData:    "等待缓存数据...",
   tok:        "tok",
+  distTitle:  "可解析 Token 分布",
+  distSys:    "系统提示:",
+  distUser:   "用户:",
+  distAgent:  "Agent 指令:",
+  distTool:   "Tool 调用:",
+  distRes:    "Tool 结果:",
+  distTotal:  "总计:",
+  distOut:    "输出:",
 } as const : {
   title:      "Token Cache",
   hit:        "Hit",
@@ -102,6 +117,14 @@ const T = LANG_ZH ? {
   writeRate:  "write",
   noData:    "Waiting for cache data...",
   tok:        "tok",
+  distTitle:  "Parseable Token Dist.",
+  distSys:    "System:",
+  distUser:   "User:",
+  distAgent:  "Agent Instr:",
+  distTool:   "Tool Call:",
+  distRes:    "Tool Result:",
+  distTotal:  "Total:",
+  distOut:    "Output:",
 } as const
 
 // ── color helpers ────────────────────────────────────────────────
@@ -207,6 +230,37 @@ function fmtCost(n: number): string {
   return "$" + n.toFixed(4)
 }
 
+// ── token estimation ──
+// Rough estimate: ~4 ASCII chars ~ 1 token, ~1.5 CJK chars ~ 1 token
+
+function estimateTokens(text: string): number {
+  if (!text || text.length === 0) return 0
+  let ascii = 0
+  let cjk = 0
+  for (const c of text) {
+    const code = c.codePointAt(0) ?? 0
+    if (code >= 0x4E00 && code <= 0x9FFF) cjk++       // CJK Unified
+    else if (code >= 0x3040 && code <= 0x30FF) cjk++   // Hiragana/Katakana
+    else if (code >= 0xAC00 && code <= 0xD7A3) cjk++   // Hangul
+    else if (code >= 0x1100 && code <= 0x11FF) cjk++   // Hangul Jamo
+    else if (code >= 0x2E80 && code <= 0x2EFF) cjk++   // CJK Radicals
+    else ascii++
+  }
+  return Math.max(1, Math.ceil(ascii / 4 + cjk / 1.5))
+}
+
+interface TokenDist {
+  system: number   // UserMessage.system
+  user: number     // user message text/file parts
+  agent: number    // SubtaskPart.prompt + ReasoningPart.text
+  toolCall: number // ToolPart.input (actual tool params)
+  toolResult: number // ToolPart completed output / error
+  output: number   // AssistantMessage.tokens.output (fallback)
+  apiOutput: number // StepFinishPart.tokens.output (API exact, preferred)
+  apiInput: number  // StepFinishPart.tokens.input (API exact total context)
+  stepCost: number
+}
+
 // ---------------------------------------------------------------------------
 // Sidebar component
 // ---------------------------------------------------------------------------
@@ -232,6 +286,7 @@ function TokenCachePanel(props: {
 }): JSX.Element {
   const [panelWidth, setPanelWidth] = createSignal(DEFAULT_PANEL_WIDTH)
   const [open, setOpen] = createSignal(true)
+  const [distOpen, setDistOpen] = createSignal(false)
   let boxEl: any
 
   // ── scan session messages reactively ──
@@ -295,8 +350,8 @@ function TokenCachePanel(props: {
     // `input` from the API represents fresh (non-cached) tokens.
     const hitRate = lastMsgHitRate >= 0 ? lastMsgHitRate : 0
     // Total context = fresh + cache.read.
-    const totalInput = input + read
-    const sessionHitRate = totalInput > 0 ? (read / totalInput) * 100 : 0
+    const freshTotal = input + read
+    const sessionHitRate = freshTotal > 0 ? (read / freshTotal) * 100 : 0
     const model = mid.split("/").pop() ?? mid
     const hasPricing = inputRate > 0 || cacheReadRate > 0 || cacheWriteRate > 0
 
@@ -308,6 +363,87 @@ function TokenCachePanel(props: {
 
     const providerName = pid || ""
 
+    // ── token distribution (in-process via api.state.part) ──
+    // Wrapped in try-catch so a part fetching failure never crashes the panel.
+    let dist: TokenDist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
+    let hasDistData = false
+    try {
+      partVersion() // track part changes for reactivity
+
+      dist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
+
+      for (const msg of msgs) {
+        if (msg.role === "user") {
+          const um = msg as UserMessage
+          // System prompt: from agent config (api.state.config.agent[agentName].prompt)
+          try {
+            const session = props.api.state.session.get(props.sessionId)
+            const cfg = props.api.state.config as Record<string, unknown>
+            const agentName = String(session?.agent ?? (cfg as any)?.default_agent ?? "build")
+            const agents = cfg?.agent as Record<string, unknown> | undefined
+            const agentCfg = agents?.[agentName] as Record<string, unknown> | undefined
+            const sysPrompt = typeof agentCfg?.prompt === "string" ? agentCfg.prompt : ""
+            if (sysPrompt) dist.system = estimateTokens(sysPrompt)
+          } catch {}
+          if (um.system) dist.system += estimateTokens(um.system)
+          let parts: readonly Part[] = []
+          try { parts = props.api.state.part(msg.id) } catch {}
+          for (const p of parts) {
+            if (p.type === "text" && !(p as unknown as Record<string, unknown>).synthetic && !(p as unknown as Record<string, unknown>).ignored) {
+              dist.user += estimateTokens((p as unknown as TextPart).text)
+            } else if (p.type === "file") {
+              const fp = p as unknown as FilePart
+              if (fp.source?.text?.value) dist.user += estimateTokens(fp.source.text.value)
+            }
+          }
+        } else if (msg.role === "assistant") {
+          const am = msg as AssistantMessage
+          dist.output += num(am.tokens?.output)
+
+          let parts: readonly Part[] = []
+          try { parts = props.api.state.part(msg.id) } catch {}
+          for (const p of parts) {
+            if (p.type === "tool") {
+              const tp = p as unknown as ToolPart
+              // Tool call input (params)
+              let rawInput = ""
+              try {
+                rawInput = (tp.state as unknown as { raw?: string }).raw ?? JSON.stringify(tp.state.input)
+              } catch { try { rawInput = JSON.stringify(tp.state) } catch {} }
+              if (rawInput) dist.toolCall += estimateTokens(rawInput)
+              // Tool result output
+              if (tp.state.status === "completed") {
+                const completed = tp.state as unknown as { output: string }
+                if (completed.output) dist.toolResult += estimateTokens(completed.output)
+              } else if (tp.state.status === "error") {
+                const errored = tp.state as unknown as { error: string }
+                if (errored.error) dist.toolResult += estimateTokens(errored.error)
+              }
+            } else if (p.type === "reasoning") {
+              dist.agent += estimateTokens((p as unknown as ReasoningPart).text)
+            } else if (p.type === "subtask") {
+              const sub = p as unknown as { prompt: string; description: string }
+              dist.agent += estimateTokens(sub.prompt || sub.description || "")
+            } else if (p.type === "step-finish") {
+              // StepFinishPart carries API-exact per-call token counts.
+              // Sum across all step-finish parts (one per API call in tool loops).
+              const sf = p as unknown as { tokens?: { input?: number; output?: number } }
+              dist.apiInput += sf.tokens?.input ?? 0
+              dist.apiOutput += sf.tokens?.output ?? 0
+            }
+          }
+        }
+      }
+
+      const totalInput = dist.system + dist.user + dist.agent + dist.toolCall + dist.toolResult
+      const apiTotalInput = dist.apiInput
+      // Use API output if available (StepFinishPart is more accurate than AssistantMessage.tokens)
+      const finalOutput = dist.apiOutput > 0 ? dist.apiOutput : dist.output
+      hasDistData = totalInput > 0 || finalOutput > 0 || apiTotalInput > 0
+    } catch {
+      // Graceful degradation — dist stays at zeroes
+    }
+
     return {
       hitRate, read, write, freshInput: input, output,
       cost, saved, model, inputRate, cacheReadRate, cacheWriteRate, hasPricing,
@@ -315,7 +451,21 @@ function TokenCachePanel(props: {
       trend, hasTrendData,
       providerName,
       sessionHitRate,
+      dist, hasDistData,
     }
+  })
+
+  // ── token distribution (in-process via api.state.part) ──
+  const [partVersion, setPartVersion] = createSignal(0)
+
+  onMount(() => {
+    const unsubPart = props.api.event.on("message.part.updated", () => {
+      setPartVersion((v) => v + 1)
+    })
+    const unsubMsg = props.api.event.on("message.updated", () => {
+      setPartVersion((v) => v + 1)
+    })
+    onCleanup(() => { unsubPart(); unsubMsg() })
   })
 
   // ── colours ──
@@ -353,7 +503,7 @@ function TokenCachePanel(props: {
     return Math.max(3, panelWidth() - overhead)
   })
   const bar = createMemo(() => progressBar(data().hitRate, barW()))
-  const pct = createMemo(() => data().hitRate.toFixed(1) + "%")
+  const pct = createMemo(() => (Math.floor(data().hitRate * 10) / 10).toFixed(1) + "%")
 
   // left-align label, right-align value — auto-fill space between
   const justify = (label: string, value: string, unit = ""): string => {
@@ -434,7 +584,7 @@ function TokenCachePanel(props: {
 
           {/* session cumulative hit rate */}
           <text fg={pal().muted}>
-            {justify(T.totalHit, data().sessionHitRate.toFixed(1) + "%")}
+            {justify(T.totalHit, (Math.floor(data().sessionHitRate * 10) / 10).toFixed(1) + "%")}
           </text>
 
           {/* token breakdown */}
@@ -497,6 +647,45 @@ function TokenCachePanel(props: {
               <text fg={pal().muted}>
                 {justify("", "$" + data().cacheWriteRate.toFixed(2) + "/M " + T.writeRate)}
               </text>
+            </Show>
+          </Show>
+
+          {/* ── token distribution (in-process, second-level collapse) ── */}
+          <Show when={data().hasDistData}>
+            <text fg={pal().muted}>{sep()}</text>
+            <text onMouseUp={() => setDistOpen((o) => !o)}>
+              <span style={{ fg: pal().muted }}>{distOpen() ? "\u25be " : "\u25b8 "}</span>
+              <span style={{ fg: pal().primary }}><b>{T.distTitle}</b></span>
+            </text>
+            <Show when={distOpen()}>
+            <Show when={data().dist.system > 0}>
+              <text fg={pal().muted}>
+                {justify(T.distSys, fmt(data().dist.system), T.tok)}
+              </text>
+            </Show>
+            <Show when={data().dist.user > 0}>
+              <text fg={pal().muted}>
+                {justify(T.distUser, fmt(data().dist.user), T.tok)}
+              </text>
+            </Show>
+            <Show when={data().dist.agent > 0}>
+              <text fg={pal().muted}>
+                {justify(T.distAgent, fmt(data().dist.agent), T.tok)}
+              </text>
+            </Show>
+            <Show when={data().dist.toolCall > 0}>
+              <text fg={pal().muted}>
+                {justify(T.distTool, fmt(data().dist.toolCall), T.tok)}
+              </text>
+            </Show>
+            <Show when={data().dist.toolResult > 0}>
+              <text fg={pal().muted}>
+                {justify(T.distRes, fmt(data().dist.toolResult), T.tok)}
+              </text>
+            </Show>
+            <text fg={pal().text}>
+              {justify(T.distTotal, fmt(data().dist.system + data().dist.user + data().dist.agent + data().dist.toolCall + data().dist.toolResult), T.tok)}
+            </text>
             </Show>
           </Show>
         </Show>
