@@ -37,8 +37,10 @@
 - **Model Pricing**: Current model's input / cache-read rates (from provider config)
 - **Collapsible**: Click title to fold into one line
 - **Adaptive Colors**: ≥85% green · ≥70% orange · <70% red, auto-desaturated from theme
-- **Token Distribution**: Per-role (system prompt / user / tool call / tool result / output) live token estimation — no external process required
-- **Language**: Auto-detects system locale, switches between Chinese and English
+- **Token Distribution**: Per-role (system / user / agent instr / tool call / tool result) parseable token breakdown
+- **Collapsible Sections**: Detail, model, and token distribution fold independently
+- **Persistent Fold State**: Fold preferences remembered across restarts
+- **Language**: Auto-detects system locale
 
 ---
 
