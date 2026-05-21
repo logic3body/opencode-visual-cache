@@ -523,7 +523,7 @@ function TokenCachePanel(props: {
   onMount(() => {
     // Restore fold state from persisted storage
     try {
-      setOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.open`, true)))
+      setOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.open`, false)))
       setDetailOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.detail`, true)))
       setModelOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.model`, true)))
       setDistOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.dist`, false)))
@@ -595,8 +595,8 @@ function TokenCachePanel(props: {
       gap={0}
       ref={boxEl}
       onSizeChange={() => {
-        // 通过 ref 获取 Renderable 实例宽度
-        const w = boxEl ? Math.max(MIN_PANEL_WIDTH, boxEl.width) : DEFAULT_PANEL_WIDTH
+        // boxEl.width may be undefined before the first measurement — guard with 0
+        const w = boxEl ? Math.max(MIN_PANEL_WIDTH, boxEl.width ?? 0) : DEFAULT_PANEL_WIDTH
         setPanelWidth((prev) => (prev === w ? prev : w))
       }}
     >
