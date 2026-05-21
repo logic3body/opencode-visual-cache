@@ -326,8 +326,6 @@ const DEFAULT_RATES: Record<string, number> = {
 
 const MIN_PANEL_WIDTH = 20
 const DEFAULT_PANEL_WIDTH = 26
-/** Horizontal space eaten by border (1+1) + padding (2+2). */
-const GUTTER = 2 + 4
 
 /** ── layout measurement constants (visual columns) ── */
 const LABEL_GAP = 1        // label（如 "Hit"）后面的空格
@@ -595,14 +593,17 @@ function TokenCachePanel(props: {
     return pal().error
   })
 
-  const sep = createMemo(() => "\u2500".repeat(Math.max(1, panelWidth() - GUTTER)))
+  /** Horizontal space eaten by border (1+1 when visible) + padding (2+2). */
+  const gutter = createMemo(() => (borderVisible() ? 2 : 0) + 4)
+
+  const sep = createMemo(() => "\u2500".repeat(Math.max(1, panelWidth() - gutter())))
   function trendLabel(t: number): string {
     return (t > 0 ? "\u2191" : t < 0 ? "\u2193" : "-") + (t !== 0 ? Math.abs(t).toFixed(1) + "%" : "")
   }
 
   const barW = createMemo(() => {
     const trendSpace = data().hasTrendData ? LABEL_GAP + visualWidth(trendLabel(data().trend)) : 0
-    const overhead = visualWidth(T.hit) + LABEL_GAP + BAR_BRACKETS + BAR_GAP + PCT_FIXED_WIDTH + trendSpace + GUTTER
+    const overhead = visualWidth(T.hit) + LABEL_GAP + BAR_BRACKETS + BAR_GAP + PCT_FIXED_WIDTH + trendSpace + gutter()
     return Math.max(3, panelWidth() - overhead)
   })
   const bar = createMemo(() => progressBar(data().hitRate, barW()))
@@ -610,7 +611,7 @@ function TokenCachePanel(props: {
 
   // left-align label, right-align value — auto-fill space between
   const justify = (label: string, value: string, unit = ""): string => {
-    const gauge = panelWidth() - GUTTER
+    const gauge = panelWidth() - gutter()
     const used = visualWidth(label) + visualWidth(value) + (unit ? visualWidth(unit) + UNIT_GAP : 0)
     const gap = Math.max(1, gauge - used)
     return label + " ".repeat(gap) + value + (unit ? " " + unit : "")
@@ -645,7 +646,7 @@ function TokenCachePanel(props: {
         <Show when={!open() && data().hasData}>
           <Show when={data().hasTrendData}>
             <span>
-              {" ".repeat(Math.max(1, panelWidth() - GUTTER - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded + " " + trendLabel(data().trend))))}
+              {" ".repeat(Math.max(1, panelWidth() - gutter() - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded + " " + trendLabel(data().trend))))}
             </span>
             <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
             <span style={{ fg: data().trend !== 0 ? (data().trend > 0 ? pal().success : pal().error) : pal().text }}>
@@ -654,7 +655,7 @@ function TokenCachePanel(props: {
           </Show>
           <Show when={!data().hasTrendData}>
             <span>
-              {" ".repeat(Math.max(1, panelWidth() - GUTTER - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
+              {" ".repeat(Math.max(1, panelWidth() - gutter() - HEADER_PREFIX - visualWidth(T.title) - visualWidth(pct() + " " + T.hitFolded)))}
             </span>
             <span style={{ fg: hitColor() }}>{pct()} {T.hitFolded}</span>
           </Show>
@@ -718,7 +719,7 @@ function TokenCachePanel(props: {
             <Show when={data().saved > 0}>
               <text>
                 <span style={{ fg: pal().muted }}>{T.saved}</span>
-                <span>{" ".repeat(Math.max(1, panelWidth() - GUTTER - visualWidth(T.saved) - visualWidth("~" + fmtCost(data().saved, currencySymbol(), exchangeRate()))))}</span>
+                <span>{" ".repeat(Math.max(1, panelWidth() - gutter() - visualWidth(T.saved) - visualWidth("~" + fmtCost(data().saved, currencySymbol(), exchangeRate()))))}</span>
                 <span style={{ fg: pal().success }}>~{fmtCost(data().saved, currencySymbol(), exchangeRate())}</span>
               </text>
             </Show>
