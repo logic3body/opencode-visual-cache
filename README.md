@@ -133,6 +133,8 @@ npm install -g opencode-visual-cache@latest
 - **模型与定价**：费用 / 提供商 / 模型名 / 单价
 - **估算 Token 分布**：按角色拆分的 Token 估算
 
+通过 `/cache-section` 切换后即时生效，无需重启。此外，该命令还可以开关面板的**外边框**——关闭后内容会顶格显示，释放额外空间。
+
 通过 `/cache-section` 切换后即时生效，无需重启。
 
 ---

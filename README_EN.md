@@ -132,7 +132,7 @@ Three sub-sections can be toggled independently to save sidebar space:
 - **Model & Pricing**: cost / provider / model name / per-million rates
 - **Estimated Token Dist.**: per-role token breakdown
 
-Toggled via `/cache-section` — takes effect instantly, no restart required.
+Toggled via `/cache-section` — takes effect instantly, no restart required. The same command also toggles the panel **border**; turning it off removes the outline and padding so content fills the full width.
 
 ---
 
