@@ -555,10 +555,11 @@ function TokenCachePanel(props: {
       setSectionDetail(Boolean(props.api.kv.get(`${KV_PREFIX}.section.detail`, true)))
       setSectionModel(Boolean(props.api.kv.get(`${KV_PREFIX}.section.model`, true)))
       setSectionDist(Boolean(props.api.kv.get(`${KV_PREFIX}.section.dist`, true)))
+      const borderVal = props.api.kv.get<boolean>(`${KV_PREFIX}.border`, true)
+      setBorderVisible(borderVal !== false)
     } catch {}
 
-    // Restore border visibility
-    try { setBorderVisible(Boolean(props.api.kv.get(`${KV_PREFIX}.border`, true))) } catch {}
+    // (border visibility was restored above together with section config)
 
     const unsubPart = props.api.event.on("message.part.updated", () => {
       setPartVersion((v) => v + 1)
@@ -619,7 +620,8 @@ function TokenCachePanel(props: {
 
   return (
     <box
-      {...(borderVisible() ? { border: true, borderColor: pal().border } : {})}
+      border={borderVisible()}
+      borderColor={pal().border}
       paddingTop={0}
       paddingBottom={0}
       paddingLeft={borderVisible() ? 2 : 0}
