@@ -282,7 +282,9 @@ function estimateTokens(text: string): number {
   // The old 2.0 / 2.5 ratios matched minified-JS extremes, not typical
   // payloads, and systematically over-estimated token counts.
   const trimmed = text.trimStart()
-  const jsonLike = (trimmed.startsWith("{") || trimmed.startsWith("["))
+  // Strip markdown code-fence prefix so that ```json … is detected as JSON
+  const strippedFence = trimmed.replace(/^\x60{3}\w*\s*\n?/, "")
+  const jsonLike = (strippedFence.startsWith("{") || strippedFence.startsWith("["))
     && /"[^"]+"\s*:/.test(text)
   const codeLike = !jsonLike
     && /```|^import |^export |^function |^const |^let |^var |^class |^interface |^type |^def |^fn |^pub |^use |^mod |^package /m.test(text)
@@ -446,18 +448,21 @@ function TokenCachePanel(props: {
               else if (p.type === "file") { const fp = p as any; if (fp.source?.text?.value) dist.user += estimateTokens(fp.source.text.value) }
             }
           } else if (msg.role === "assistant") {
-            const am = msg as AssistantMessage; dist.output += num(am.tokens?.output)
+            const am = msg as AssistantMessage
+            dist.output += num(am.tokens?.output)
+            // Message-level tokens survive compaction; step-finish parts can be removed.
+            dist.apiInput += num(am.tokens?.input)
+            dist.apiOutput += num(am.tokens?.output)
             let parts: readonly Part[] = []; try { parts = props.api.state.part(msg.id) } catch {}
             for (const p of parts) {
               if (p.type === "tool") {
                 const tp = p as any; let rawInput = ""
-                try { rawInput = tp.state.raw ?? JSON.stringify(tp.state.input) } catch { try { rawInput = JSON.stringify(tp.state) } catch {} }
+                try { rawInput = tp.state.raw ?? (tp.state.input != null ? JSON.stringify(tp.state.input) : "") } catch {}
                 if (rawInput) dist.toolCall += estimateTokens(rawInput)
                 if (tp.state.status === "completed") { const c = tp.state; if (c.output) dist.toolResult += estimateTokens(c.output) }
                 else if (tp.state.status === "error") { const e = tp.state; if (e.error) dist.toolResult += estimateTokens(e.error) }
               } else if (p.type === "reasoning") dist.agent += estimateTokens((p as any).text)
               else if (p.type === "subtask") { const sub = p as any; dist.agent += estimateTokens(sub.prompt || sub.description || "") }
-              else if (p.type === "step-finish") { const sf = p as any; dist.apiInput += sf.tokens?.input ?? 0; dist.apiOutput += sf.tokens?.output ?? 0 }
             }
           }
         }
