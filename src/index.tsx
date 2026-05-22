@@ -17,7 +17,7 @@ import type {
   FilePart,
   ReasoningPart,
 } from "@opencode-ai/sdk/v2"
-import { createMemo, createSignal, createEffect, onMount, onCleanup, Show } from "solid-js"
+import { createMemo, createSignal, createEffect, onMount, onCleanup, Show, untrack } from "solid-js"
 import { PLUGIN_VERSION } from "./_version"
 
 // ---------------------------------------------------------------------------
@@ -383,187 +383,90 @@ function TokenCachePanel(props: {
   })
   const [lastHasDist, setLastHasDist] = createSignal(false)
 
-  const data = createMemo(() => {
-    const msgs = props.api.state.session.messages(props.sessionId) as Message[]
+  const [dataSignal, setDataSignal] = createSignal<any>({
+    hitRate: 0, read: 0, write: 0, freshInput: 0, output: 0,
+    cost: 0, saved: 0, model: "", inputRate: 0, cacheReadRate: 0, cacheWriteRate: 0,
+    hasPricing: false, hasData: false, trend: 0, hasTrendData: false,
+    providerName: "", sessionHitRate: 0,
+    dist: { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 },
+    hasDistData: false,
+  })
+  const [refreshTick, setRefreshTick] = createSignal(0)
 
-    let input = 0
-    let read = 0
-    let write = 0
-    let output = 0
-    let cost = 0
-    let pid = ""
-    let mid = ""
-
-    // Track individual hit rates per assistant message to compute trend
-    let prevMsgHitRate = -1
-    let lastMsgHitRate = -1
-
-    for (const msg of msgs) {
-      if (msg.role !== "assistant") continue
-      const t = (msg as AssistantMessage).tokens
-      if (!t) continue
-      const msgInputTokens = num(t.input) + num(t.cache?.read)
-      const msgReadTokens = num(t.cache?.read)
-      if (msgInputTokens > 0) {
-        prevMsgHitRate = lastMsgHitRate
-        lastMsgHitRate = (msgReadTokens / msgInputTokens) * 100
+  createEffect(() => {
+    const sid = props.sessionId
+    void refreshTick()
+    const result = untrack(() => {
+      const msgs = props.api.state.session.messages(sid) as Message[]
+      let input = 0, read = 0, write = 0, output = 0, cost = 0, pid = "", mid = ""
+      let prevMsgHitRate = -1, lastMsgHitRate = -1
+      for (const msg of msgs) {
+        if (msg.role !== "assistant") continue
+        const t = (msg as AssistantMessage).tokens; if (!t) continue
+        const mit = num(t.input) + num(t.cache?.read), mrt = num(t.cache?.read)
+        if (mit > 0) { prevMsgHitRate = lastMsgHitRate; lastMsgHitRate = (mrt / mit) * 100 }
+        input += num(t.input); read += num(t.cache?.read); write += num(t.cache?.write); output += num(t.output)
+        cost += num((msg as AssistantMessage).cost)
+        if ((msg as AssistantMessage).providerID && (msg as AssistantMessage).modelID) { pid = (msg as AssistantMessage).providerID; mid = (msg as AssistantMessage).modelID }
       }
-      input += num(t.input)
-      read   += num(t.cache?.read)
-      write  += num(t.cache?.write)
-      output += num(t.output)
-      cost   += num((msg as AssistantMessage).cost)
-      if ((msg as AssistantMessage).providerID && (msg as AssistantMessage).modelID) {
-        pid = (msg as AssistantMessage).providerID
-        mid = (msg as AssistantMessage).modelID
-      }
-    }
-
-    // cost savings from cache hits
-    let saved = 0
-    let inputRate = 0
-    let cacheReadRate = 0
-    let cacheWriteRate = 0
-    if (read > 0 && pid && mid) {
-      for (const provider of props.api.state.provider) {
+      let saved = 0, inputRate = 0, cacheReadRate = 0, cacheWriteRate = 0
+      if (read > 0 && pid && mid) for (const provider of props.api.state.provider) {
         if (provider.id !== pid) continue
-        const model = provider.models[mid]
-        if (!model?.cost) continue
-        inputRate = num(model.cost.input)
-        cacheReadRate = num(model.cost.cache?.read)
-        cacheWriteRate = num(model.cost.cache?.write)
-        const diff = inputRate - cacheReadRate
-        if (diff > 0) saved = (read * diff) / 1_000_000
+        const model = provider.models[mid]; if (!model?.cost) continue
+        inputRate = num(model.cost.input); cacheReadRate = num(model.cost.cache?.read); cacheWriteRate = num(model.cost.cache?.write)
+        if (inputRate > cacheReadRate) saved = (read * (inputRate - cacheReadRate)) / 1_000_000
         break
       }
-    }
-
-    // `input` from the API represents fresh (non-cached) tokens.
-    const hitRate = lastMsgHitRate >= 0 ? lastMsgHitRate : 0
-    // Total context = fresh + cache.read.
-    const freshTotal = input + read
-    const sessionHitRate = freshTotal > 0 ? (read / freshTotal) * 100 : 0
-    const model = mid.split("/").pop() ?? mid
-    const hasPricing = inputRate > 0 || cacheReadRate > 0 || cacheWriteRate > 0
-
-    let trend = 0
-    const hasTrendData = prevMsgHitRate >= 0 && lastMsgHitRate >= 0
-    if (hasTrendData) {
-      trend = lastMsgHitRate - prevMsgHitRate
-    }
-
-    const providerName = pid || ""
-
-    // ── token distribution (in-process via api.state.part) ──
-    // Wrapped in try-catch so a part fetching failure never crashes the panel.
-    let dist: TokenDist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
-    let hasDistData = false
-    try {
-      partVersion() // track part changes for reactivity
-
-      dist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
-
-      // Read agent system prompt once before the message loop.  Reading it
-      // inside the per-user-message branch risks transient unavailability
-      // (api.state.config not yet resolved during streaming) silently
-      // resetting a previously-computed value and causing display flicker.
+      const hitRate = lastMsgHitRate >= 0 ? lastMsgHitRate : 0
+      const freshTotal = input + read, sessionHitRate = freshTotal > 0 ? (read / freshTotal) * 100 : 0
+      const model = mid.split("/").pop() ?? mid, hasPricing = inputRate > 0 || cacheReadRate > 0 || cacheWriteRate > 0
+      const hasTrendData = prevMsgHitRate >= 0 && lastMsgHitRate >= 0
+      const trend = hasTrendData ? lastMsgHitRate - prevMsgHitRate : 0, providerName = pid || ""
+      let dist: TokenDist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
+      let hasDistData = false
       try {
-        const session = props.api.state.session.get(props.sessionId)
-        const cfg = props.api.state.config as Record<string, unknown>
+        const session = props.api.state.session.get(sid), cfg = props.api.state.config as Record<string, unknown>
         const agentName = String(session?.agent ?? (cfg as any)?.default_agent ?? "build")
         const agents = cfg?.agent as Record<string, unknown> | undefined
         const agentCfg = agents?.[agentName] as Record<string, unknown> | undefined
         const sysPrompt = typeof agentCfg?.prompt === "string" ? agentCfg.prompt : ""
         if (sysPrompt) dist.system = estimateTokens(sysPrompt)
-      } catch {}
-
-      for (const msg of msgs) {
-        if (msg.role === "user") {
-          const um = msg as UserMessage
-          if (um.system) dist.system += estimateTokens(um.system)
-          let parts: readonly Part[] = []
-          try { parts = props.api.state.part(msg.id) } catch {}
-          for (const p of parts) {
-            if (p.type === "text" && !(p as unknown as Record<string, unknown>).synthetic && !(p as unknown as Record<string, unknown>).ignored) {
-              dist.user += estimateTokens((p as unknown as TextPart).text)
-            } else if (p.type === "file") {
-              const fp = p as unknown as FilePart
-              if (fp.source?.text?.value) dist.user += estimateTokens(fp.source.text.value)
+        for (const msg of msgs) {
+          if (msg.role === "user") {
+            const um = msg as UserMessage; if (um.system) dist.system += estimateTokens(um.system)
+            let parts: readonly Part[] = []; try { parts = props.api.state.part(msg.id) } catch {}
+            for (const p of parts) {
+              if (p.type === "text" && !(p as any).synthetic && !(p as any).ignored) dist.user += estimateTokens((p as any).text)
+              else if (p.type === "file") { const fp = p as any; if (fp.source?.text?.value) dist.user += estimateTokens(fp.source.text.value) }
             }
-          }
-        } else if (msg.role === "assistant") {
-          const am = msg as AssistantMessage
-          dist.output += num(am.tokens?.output)
-
-          let parts: readonly Part[] = []
-          try { parts = props.api.state.part(msg.id) } catch {}
-          for (const p of parts) {
-            if (p.type === "tool") {
-              const tp = p as unknown as ToolPart
-              // Tool call input (params)
-              let rawInput = ""
-              try {
-                rawInput = (tp.state as unknown as { raw?: string }).raw ?? JSON.stringify(tp.state.input)
-              } catch { try { rawInput = JSON.stringify(tp.state) } catch {} }
-              if (rawInput) dist.toolCall += estimateTokens(rawInput)
-              // Tool result output
-              if (tp.state.status === "completed") {
-                const completed = tp.state as unknown as { output: string }
-                if (completed.output) dist.toolResult += estimateTokens(completed.output)
-              } else if (tp.state.status === "error") {
-                const errored = tp.state as unknown as { error: string }
-                if (errored.error) dist.toolResult += estimateTokens(errored.error)
-              }
-            } else if (p.type === "reasoning") {
-              dist.agent += estimateTokens((p as unknown as ReasoningPart).text)
-            } else if (p.type === "subtask") {
-              const sub = p as unknown as { prompt: string; description: string }
-              dist.agent += estimateTokens(sub.prompt || sub.description || "")
-            } else if (p.type === "step-finish") {
-              // StepFinishPart carries API-exact per-call token counts.
-              // Sum across all step-finish parts (one per API call in tool loops).
-              const sf = p as unknown as { tokens?: { input?: number; output?: number } }
-              dist.apiInput += sf.tokens?.input ?? 0
-              dist.apiOutput += sf.tokens?.output ?? 0
+          } else if (msg.role === "assistant") {
+            const am = msg as AssistantMessage; dist.output += num(am.tokens?.output)
+            let parts: readonly Part[] = []; try { parts = props.api.state.part(msg.id) } catch {}
+            for (const p of parts) {
+              if (p.type === "tool") {
+                const tp = p as any; let rawInput = ""
+                try { rawInput = tp.state.raw ?? JSON.stringify(tp.state.input) } catch { try { rawInput = JSON.stringify(tp.state) } catch {} }
+                if (rawInput) dist.toolCall += estimateTokens(rawInput)
+                if (tp.state.status === "completed") { const c = tp.state; if (c.output) dist.toolResult += estimateTokens(c.output) }
+                else if (tp.state.status === "error") { const e = tp.state; if (e.error) dist.toolResult += estimateTokens(e.error) }
+              } else if (p.type === "reasoning") dist.agent += estimateTokens((p as any).text)
+              else if (p.type === "subtask") { const sub = p as any; dist.agent += estimateTokens(sub.prompt || sub.description || "") }
+              else if (p.type === "step-finish") { const sf = p as any; dist.apiInput += sf.tokens?.input ?? 0; dist.apiOutput += sf.tokens?.output ?? 0 }
             }
           }
         }
-      }
+        const totalInput = dist.system + dist.user + dist.agent + dist.toolCall + dist.toolResult
+        const overhead = Math.max(0, dist.apiInput - totalInput); if (overhead >= 50) dist.system += overhead
+        hasDistData = totalInput > 0 || dist.apiOutput > 0 || dist.apiInput > 0
+      } catch {}
+      const finalDist = hasDistData ? dist : lastDist(), finalHasDist = hasDistData || lastHasDist()
+      return { hitRate, read, write, freshInput: input, output, cost, saved, model, inputRate, cacheReadRate, cacheWriteRate, hasPricing, hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0, trend, hasTrendData, providerName, sessionHitRate, dist: finalDist, hasDistData: finalHasDist }
+    })
+    setDataSignal(result)
+  })
 
-      const totalInput = dist.system + dist.user + dist.agent + dist.toolCall + dist.toolResult
-      const apiTotalInput = dist.apiInput
-      // Use API output if available (StepFinishPart is more accurate than AssistantMessage.tokens)
-      const finalOutput = dist.apiOutput > 0 ? dist.apiOutput : dist.output
-
-      // Gap inference: the SDK does not expose per-part token counts, so any
-      // API-exact input total that exceeds the locally-estimated sum is attributed
-      // to system prompt / agent config / tool-definition overhead.  Add it to the
-      // system bucket rather than replacing the local estimate.
-      const overhead = Math.max(0, apiTotalInput - totalInput)
-      if (overhead >= 50) {
-        dist.system += overhead
-      }
-
-      hasDistData = totalInput > 0 || finalOutput > 0 || apiTotalInput > 0
-    } catch {
-      // Graceful degradation — dist stays at zeroes
-    }
-
-    // Fall back to last known-good distribution while api.state.part()
-    // is re-hydrating after a view switch.
-    const finalDist = hasDistData ? dist : lastDist()
-    const finalHasDist = hasDistData || lastHasDist()
-
-    return {
-      hitRate, read, write, freshInput: input, output,
-      cost, saved, model, inputRate, cacheReadRate, cacheWriteRate, hasPricing,
-      hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0,
-      trend, hasTrendData,
-      providerName,
-      sessionHitRate,
-      dist: finalDist,
-      hasDistData: finalHasDist,
-    }
+  const data = createMemo(() => {
+    return dataSignal()
   })
 
   // Persist the last valid distribution so that data() can fall back
@@ -657,8 +560,9 @@ function TokenCachePanel(props: {
       clearTimeout(partTimer)
       partTimer = setTimeout(() => setPartVersion((v) => v + 1), 100)
     }
-    const unsubPart = props.api.event.on("message.part.updated", bumpPartVersion)
-    const unsubMsg = props.api.event.on("message.updated", bumpPartVersion)
+    const unsubPart = props.api.event.on("message.part.updated", () => { bumpPartVersion(); setRefreshTick(v => v + 1) })
+    const unsubMsg = props.api.event.on("message.updated", () => { bumpPartVersion(); setRefreshTick(v => v + 1) })
+    setRefreshTick(v => v + 1)
     onCleanup(() => { clearTimeout(partTimer); unsubPart(); unsubMsg() })
   })
 
