@@ -59,6 +59,18 @@ function visualPadEnd(s: string, cols: number): string {
   return pad > 0 ? s + " ".repeat(pad) : s
 }
 
+/** Truncate `s` to fit within `maxCols` visual columns, appending "…" when cut. */
+function truncateVisual(s: string, maxCols: number): string {
+  if (visualWidth(s) <= maxCols) return s
+  let result = "", w = 0
+  for (const c of s) {
+    const cw = charColumns(c)
+    if (w + cw > maxCols - 1) { result += "\u2026"; break }
+    result += c; w += cw
+  }
+  return result
+}
+
 // ── language override (env: CACHE_TUI_LANG) ──
 const DEBUG_LANG = typeof process !== "undefined" ? process.env?.CACHE_TUI_LANG : undefined
 
@@ -100,6 +112,7 @@ const ZH_T = {
   distOut:    "输出:",
   secDetail:  "明细",
   secModel:   "模型",
+  secSkills:  "已加载技能",
 } as const
 
 const EN_T = {
@@ -131,6 +144,7 @@ const EN_T = {
   distOut:    "Output:",
   secDetail:  "Detail",
   secModel:   "Model",
+  secSkills:  "Loaded Skills",
 } as const
 
 // ── color helpers ────────────────────────────────────────────────
@@ -327,6 +341,8 @@ interface PanelSignals {
   setSectionModel: (v: boolean) => void
   sectionDist: () => boolean
   setSectionDist: (v: boolean) => void
+  sectionSkills: () => boolean
+  setSectionSkills: (v: boolean) => void
   borderVisible: () => boolean
   setBorderVisible: (v: boolean) => void
 }
@@ -363,6 +379,7 @@ function TokenCachePanel(props: {
   const [detailOpen, setDetailOpen] = createSignal(true)
   const [modelOpen, setModelOpen] = createSignal(true)
   const [distOpen, setDistOpen] = createSignal(false)
+  const [skillsOpen, setSkillsOpen] = createSignal(true)
   let boxEl: any
 
   // ── shared signals (de-structured so internal code is unchanged) ──
@@ -373,6 +390,7 @@ function TokenCachePanel(props: {
     sectionDetail, setSectionDetail,
     sectionModel, setSectionModel,
     sectionDist, setSectionDist,
+    sectionSkills, setSectionSkills,
     borderVisible, setBorderVisible,
   } = props.signals
 
@@ -401,6 +419,8 @@ function TokenCachePanel(props: {
     providerName: "", sessionHitRate: 0,
     dist: { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 },
     hasDistData: false,
+    skills: [] as { name: string; tokens: number }[],
+    hasSkills: false,
   })
   const [refreshTick, setRefreshTick] = createSignal(0)
 
@@ -440,6 +460,7 @@ function TokenCachePanel(props: {
     const distData = untrack(() => {
       let dist: TokenDist = { system: 0, user: 0, agent: 0, toolCall: 0, toolResult: 0, output: 0, apiOutput: 0, apiInput: 0, stepCost: 0 }
       let hasDistData = false
+      const loadedSkills = new Map<string, { name: string; tokens: number }>()
       try {
         const session = props.api.state.session.get(sid), cfg = props.api.state.config as Record<string, unknown>
         const agentName = String(session?.agent ?? (cfg as any)?.default_agent ?? "build")
@@ -467,6 +488,24 @@ function TokenCachePanel(props: {
                 if (rawInput) dist.toolCall += estimateTokens(rawInput)
                 if (tp.state.status === "completed") { const c = tp.state; if (c.output) dist.toolResult += estimateTokens(c.output) }
                 else if (tp.state.status === "error") { const e = tp.state; if (e.error) dist.toolResult += estimateTokens(e.error) }
+                if (tp.tool === "skill" && tp.state.status === "completed") {
+                  // TUI SDK strips tool metadata — extract skill name from well-known output format.
+                  // Cross-validated against api.client.app.skills() when available.
+                  let name: string | undefined = tp.state.metadata?.name
+                  if (typeof name !== "string") {
+                    const m = typeof tp.state.output === "string"
+                      ? tp.state.output.match(/^#{1,2}\s*Skill:\s*(.+)/m)
+                      : null
+                    if (m) name = m[1].trim()
+                  }
+                  if (typeof name === "string") {
+                    const tokens = typeof tp.state.output === "string" ? estimateTokens(tp.state.output) : 0
+                    const existing = loadedSkills.get(name)
+                    if (!existing || existing.tokens < tokens) {
+                      loadedSkills.set(name, { name, tokens })
+                    }
+                  }
+                }
               } else if (p.type === "reasoning") dist.agent += estimateTokens((p as any).text)
               else if (p.type === "subtask") { const sub = p as any; dist.agent += estimateTokens(sub.prompt || sub.description || "") }
             }
@@ -484,7 +523,8 @@ function TokenCachePanel(props: {
         hasDistData = dist.system + dist.user + dist.agent + dist.toolCall + dist.toolResult > 0 || dist.apiOutput > 0 || dist.apiInput > 0
       } catch {}
       const finalDist = hasDistData ? dist : lastDist(), finalHasDist = hasDistData || lastHasDist()
-      return { finalDist, finalHasDist }
+      const skills = [...loadedSkills.values()]
+      return { finalDist, finalHasDist, skills }
     })
 
     setDataSignal({
@@ -493,6 +533,7 @@ function TokenCachePanel(props: {
       hasData: read > 0 || write > 0 || input > 0 || output > 0 || cost > 0,
       trend, hasTrendData, providerName, sessionHitRate,
       dist: distData.finalDist, hasDistData: distData.finalHasDist,
+      skills: distData.skills, hasSkills: distData.skills.length > 0,
     })
   })
 
@@ -532,6 +573,7 @@ function TokenCachePanel(props: {
       setDetailOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.detail`, true)))
       setModelOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.model`, true)))
       setDistOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.dist`, false)))
+      setSkillsOpen(Boolean(props.api.kv.get(`${KV_PREFIX}.skills`, true)))
     } catch {}
 
     // Restore user config (currency, rate, section visibility).
@@ -546,6 +588,7 @@ function TokenCachePanel(props: {
         setSectionDetail(Boolean(props.api.kv.get(`${KV_PREFIX}.section.detail`, true)))
         setSectionModel(Boolean(props.api.kv.get(`${KV_PREFIX}.section.model`, true)))
         setSectionDist(Boolean(props.api.kv.get(`${KV_PREFIX}.section.dist`, true)))
+        setSectionSkills(Boolean(props.api.kv.get(`${KV_PREFIX}.section.skills`, true)))
         const bv = props.api.kv.get<boolean>(`${KV_PREFIX}.border`, true)
         setBorderVisible(bv !== false)
         // Restore language preference
@@ -848,6 +891,30 @@ function TokenCachePanel(props: {
             </Show>
           </Show>
           </Show>
+
+          {/* ── loaded skills (collapsible, default open) ── */}
+          <Show when={sectionSkills()}>
+          <Show when={data().hasSkills}>
+            {<text onMouseUp={() => setSkillsOpen((o) => { const n = !o; persistFold("skills", n); return n })}>
+              <span style={{ fg: pal().muted }}>{skillsOpen() ? "\u25bc " : "\u25b6 "}</span>
+              <span style={{ fg: pal().primary }}><b>{t().secSkills}</b></span>
+              <span style={{ fg: pal().muted }}> ({data().skills.length})</span>
+              <span style={{ fg: pal().muted }}>{sep().slice(visualWidth((skillsOpen() ? "\u25bc " : "\u25b6 ") + t().secSkills + ` (${data().skills.length})`))}</span>
+            </text>}
+            <Show when={skillsOpen()}>
+                {data().skills.map((sk: { name: string; tokens: number }) => {
+                  const rightW = visualWidth(fmt(sk.tokens)) + UNIT_GAP + visualWidth(t().tok)
+                  const maxLabel = Math.max(4, panelWidth() - gutter() - rightW - 1)
+                  const label = truncateVisual("  " + sk.name, maxLabel)
+                  return (
+                    <text fg={pal().muted}>
+                      {justify(label, fmt(sk.tokens), t().tok)}
+                    </text>
+                  )
+                })}
+            </Show>
+          </Show>
+          </Show>
         </Show>
       </Show>
     </box>
@@ -883,6 +950,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
   const [sectionDetail, setSectionDetail] = createSignal(true)
   const [sectionModel, setSectionModel] = createSignal(true)
   const [sectionDist, setSectionDist] = createSignal(true)
+  const [sectionSkills, setSectionSkills] = createSignal(true)
   const [borderVisible, setBorderVisible] = createSignal(true)
   const [langZH, setLangZH] = createSignal(LANG_ZH)
 
@@ -893,6 +961,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
     sectionDetail, setSectionDetail,
     sectionModel, setSectionModel,
     sectionDist, setSectionDist,
+    sectionSkills, setSectionSkills,
     borderVisible, setBorderVisible,
   }
 
@@ -962,6 +1031,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
         const detailOn = Boolean(api.kv.get(`${KV_PREFIX}.section.detail`, true))
         const modelOn  = Boolean(api.kv.get(`${KV_PREFIX}.section.model`, true))
         const distOn   = Boolean(api.kv.get(`${KV_PREFIX}.section.dist`, true))
+        const skillsOn = Boolean(api.kv.get(`${KV_PREFIX}.section.skills`, true))
         const borderOn = Boolean(api.kv.get(`${KV_PREFIX}.border`, true))
         dialog?.replace(() => (
           <api.ui.DialogSelect
@@ -970,6 +1040,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
               { title: `Token Detail    [${detailOn ? "ON" : "OFF"}]`,  value: "detail" },
               { title: `Model & Pricing [${modelOn  ? "ON" : "OFF"}]`,  value: "model" },
               { title: `Token Dist.     [${distOn   ? "ON" : "OFF"}]`,  value: "dist" },
+              { title: `Loaded Skills   [${skillsOn ? "ON" : "OFF"}]`,  value: "skills" },
               { title: `Panel Border    [${borderOn ? "ON" : "OFF"}]`,  value: "border" },
             ]}
             onSelect={(opt) => {
@@ -985,6 +1056,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
                 if (opt.value === "detail") signals.setSectionDetail(!cur)
                 if (opt.value === "model")  signals.setSectionModel(!cur)
                 if (opt.value === "dist")   signals.setSectionDist(!cur)
+                if (opt.value === "skills") signals.setSectionSkills(!cur)
                 api.ui.toast({ message: `${opt.value} section ${!cur ? "shown" : "hidden"}` })
               }
               dialog?.clear()
@@ -1004,9 +1076,10 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
         const detail = Boolean(api.kv.get(`${KV_PREFIX}.section.detail`, true))
         const model = Boolean(api.kv.get(`${KV_PREFIX}.section.model`, true))
         const dist = Boolean(api.kv.get(`${KV_PREFIX}.section.dist`, true))
+        const skills = Boolean(api.kv.get(`${KV_PREFIX}.section.skills`, true))
         api.ui.toast({
           title: "Cache Panel Config",
-          message: `Currency: ${sym}  |  Rate: ${rate}  |  Detail: ${detail ? "ON" : "OFF"}  |  Model: ${model ? "ON" : "OFF"}  |  Dist: ${dist ? "ON" : "OFF"}`,
+          message: `Currency: ${sym}  |  Rate: ${rate}  |  Detail: ${detail ? "ON" : "OFF"}  |  Model: ${model ? "ON" : "OFF"}  |  Dist: ${dist ? "ON" : "OFF"}  |  Skills: ${skills ? "ON" : "OFF"}`,
           duration: 8000,
         })
         dialog?.clear()
@@ -1035,6 +1108,46 @@ const tui: TuiPlugin = async (api: TuiPluginApi) => {
             }}
           />
         ))
+      },
+    },
+    {
+      title: "Cache: Debug Skills Detection",
+      value: "cache.debug-skills",
+      description: "Dump all tool parts found in the current session for skill detection debugging",
+      slash: { name: "cache-debug-skills" },
+      onSelect: () => {
+        const rt = api.route.current
+        if (rt.name !== "session" || !rt.params) {
+          api.ui.toast({ message: "Please run this command inside a session", variant: "warning" })
+          return
+        }
+        const sid = String(rt.params.sessionID)
+        const msgs = api.state.session.messages(sid)
+        const byTool: Record<string, number> = {}
+        const skillParts: string[] = []
+        for (const msg of msgs) {
+          if (msg.role !== "assistant") continue
+          let parts: readonly any[] = []
+          try { parts = api.state.part(msg.id) } catch {}
+          for (const p of parts) {
+            if (p.type === "tool") {
+              const t = String(p.tool ?? "?")
+              byTool[t] = (byTool[t] ?? 0) + 1
+              if (t === "skill") {
+                const meta = p.state?.metadata
+                const rootMeta = p.metadata
+                skillParts.push(`state.metadata=${JSON.stringify(meta)} | root.metadata=${JSON.stringify(rootMeta)} | state.title="${p.state?.title}" | state.output[:80]="${String(p.state?.output ?? "").slice(0, 80)}"`)
+              }
+            }
+          }
+        }
+        const summary = Object.entries(byTool).map(([k, v]) => `${k}: ${v}`).join(" | ")
+        const extra = skillParts.length > 0 ? "\n\nSkill parts:\n" + skillParts.join("\n") : "\n\n⚠ No skill tool parts found — AI may be reading SKILL.md instead. Try: 'Use the skill tool to load karpathy-guidelines'"
+        api.ui.toast({
+          title: `Tool Summary (${Object.keys(byTool).length} types)`,
+          message: summary + extra,
+          duration: 15000,
+        })
       },
     },
   ])
